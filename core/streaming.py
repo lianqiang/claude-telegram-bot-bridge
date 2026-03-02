@@ -5,7 +5,7 @@ Streaming message handler for progressive draft message updates.
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Any, Optional, List
 
 from telegram import Bot
 from telegram.error import TelegramError
@@ -22,6 +22,7 @@ class DraftState:
     text: str
     last_update_time: float
     char_count_since_update: int = 0
+    draft_id: Optional[str] = None
 
 
 class StreamingMessageHandler:
@@ -41,24 +42,66 @@ class StreamingMessageHandler:
         self.min_chars = config.draft_update_min_chars
         self.min_interval = config.draft_update_interval
         self._finalized = False
+        self._draft_seq = 0
 
-    async def create_draft(self, text: str) -> Optional[DraftState]:
-        """Send initial draft message"""
+    def _next_draft_id(self) -> str:
+        self._draft_seq += 1
+        return f"{self.user_id}-{int(time.time() * 1000)}-{self._draft_seq}"
+
+    async def _send_draft_compat(self, text: str) -> tuple[Optional[Any], Optional[str]]:
+        """
+        Try Telegram draft API first, then gracefully fall back.
+
+        Some runtime environments expose ExtBot.send_message_draft with a required
+        `draft_id` parameter. Older/other environments may not support it.
+        """
+        if not hasattr(self.bot, "send_message_draft"):
+            return None, None
+
+        draft_id = self._next_draft_id()
         try:
             message = await self.bot.send_message_draft(
                 chat_id=self.chat_id,
-                text=text or "..."
+                draft_id=draft_id,
+                text=text,
             )
+            return message, draft_id
+        except TypeError as e:
+            logger.warning(f"send_message_draft signature mismatch, fallback to send_message: {e}")
+            return None, None
+        except TelegramError as e:
+            logger.warning(f"send_message_draft failed, fallback to send_message: {e}")
+            return None, None
+        except Exception as e:
+            logger.warning(f"send_message_draft unexpected error, fallback to send_message: {e}")
+            return None, None
+
+    async def create_draft(self, text: str) -> Optional[DraftState]:
+        """Send initial draft message"""
+        content = text or "..."
+        try:
+            message, draft_id = await self._send_draft_compat(content)
+            if message is None:
+                message = await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=content,
+                )
+                draft_id = None
+
             draft = DraftState(
                 message_id=message.message_id,
                 text=text,
                 last_update_time=time.time(),
-                char_count_since_update=0
+                char_count_since_update=0,
+                draft_id=draft_id,
             )
             self.drafts.append(draft)
             logger.debug(f"Created draft message {draft.message_id} for user {self.user_id}")
             return draft
         except TelegramError as e:
+            logger.error(f"Failed to create draft message: {e}")
+            return None
+        except Exception as e:
             logger.error(f"Failed to create draft message: {e}")
             return None
 
