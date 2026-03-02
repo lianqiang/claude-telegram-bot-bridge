@@ -312,9 +312,11 @@ class ProjectChatHandler:
                         pass
 
                 if isinstance(msg, AssistantMessage):
+                    logger.debug(f"Received AssistantMessage with {len(msg.content)} blocks")
                     req.last_assistant_texts = []
                     for block in msg.content:
                         if isinstance(block, TextBlock):
+                            logger.debug(f"TextBlock: {len(block.text)} chars")
                             req.last_assistant_texts.append(block.text)
                             # Update streaming draft if handler is available
                             if req.streaming_handler:
