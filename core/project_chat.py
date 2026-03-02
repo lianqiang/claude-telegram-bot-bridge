@@ -22,6 +22,7 @@ from claude_code_sdk import (
     PermissionResultAllow,
     PermissionResultDeny,
 )
+
 from claude_code_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
 from telegram_bot.utils.chat_logger import log_chat
@@ -57,7 +58,7 @@ CONVERSATIONS_DIR = Path.home() / ".claude" / "projects" / PROJECT_DIR_NAME
 ALLOWED_TOOLS = [
     "Read", "Edit", "Write", "MultiEdit", "Glob", "Grep",
     "WebFetch", "WebSearch", "Task", "NotebookEdit", "TodoWrite", "Bash",
-    "AskUserQuestion",
+    # AskUserQuestion is handled via disallowed_tools + can_use_tool callback
 ]
 
 PROCESS_TIMEOUT = int(os.getenv("CLAUDE_PROCESS_TIMEOUT", "600"))
@@ -88,6 +89,20 @@ def _format_ask_user_question(tool_input: dict):
             lines.append(f"{i}. {label}" + (f" - {desc}" if desc else ""))
 
     return "\n".join(lines), []
+
+
+def _detect_numbered_options(text: str) -> bool:
+    """
+    Detect if text contains numbered options format (e.g., "1. Option A").
+
+    Returns True if the text appears to contain a question with numbered choices.
+    """
+    import re
+    # Look for pattern: number followed by period and text, appearing multiple times
+    # Must have at least 2 numbered items to be considered options
+    pattern = r'^\s*\d+\.\s+.+$'
+    matches = re.findall(pattern, text, re.MULTILINE)
+    return len(matches) >= 2
 
 
 # Callback type: async (chat_id, user_id, tool_name, tool_input) -> bool | PermissionResult
@@ -162,13 +177,29 @@ class ProjectChatHandler:
         state_holder: Dict[str, _UserStreamState] = {}
 
         async def can_use_tool(tool_name, tool_input, _context=None):
+            print(f"[DEBUG] can_use_tool called: {tool_name}")
+            logger.debug(f"can_use_tool called: tool_name={tool_name}, tool_input type={type(tool_input)}")
             # AskUserQuestion: degrade to plain text instead of interactive dialog
             if tool_name == "AskUserQuestion" and isinstance(tool_input, dict):
                 formatted, _ = _format_ask_user_question(tool_input)
+                logger.debug(f"AskUserQuestion intercepted, formatted: {formatted[:200]}...")
                 s = state_holder.get("state")
                 if s and s.pending:
                     s.pending[0].synthetic_response = formatted
-                return PermissionResultDeny()
+                    logger.debug(f"Set synthetic_response for user {user_id}")
+                return PermissionResultDeny(
+                    message=(
+                        "AskUserQuestion tool is not available. "
+                        "CRITICAL: You MUST output the question and numbered options to the user, then STOP and WAIT. "
+                        "Do NOT continue execution. Do NOT make assumptions about the user's choice. "
+                        "Output format:\n\n"
+                        "[Question and context]\n\n"
+                        "1. [First option]\n"
+                        "2. [Second option]\n"
+                        "3. [Third option]\n\n"
+                        "After outputting the options, you MUST stop and wait for the user to respond with their choice."
+                    )
+                )
             state = state_holder.get("state")
             if not state or not state.pending:
                 return PermissionResultAllow()
@@ -185,7 +216,25 @@ class ProjectChatHandler:
         opts: Dict[str, Any] = {
             "cwd": str(self.project_root),
             "allowed_tools": ALLOWED_TOOLS,
+            "disallowed_tools": ["AskUserQuestion"],  # Disable to force degradation
+            "append_system_prompt": (
+                "\n\n## Important: User Questions and Choices\n\n"
+                "The AskUserQuestion tool is NOT available in this environment. "
+                "When you need to ask the user a question with multiple choice options:\n\n"
+                "1. Output the question and context clearly\n"
+                "2. List options with numbers (1., 2., 3., etc.)\n"
+                "3. STOP and WAIT for the user's response\n"
+                "4. Do NOT continue execution or make assumptions\n"
+                "5. Do NOT try to use AskUserQuestion tool\n\n"
+                "Example format:\n"
+                "Question: Which option do you prefer?\n\n"
+                "1. Option A - Description\n"
+                "2. Option B - Description\n"
+                "3. Option C - Description\n\n"
+                "After outputting options, you MUST stop and wait for user input."
+            ),
             "can_use_tool": can_use_tool,
+            "permission_mode": "default",
         }
         if model:
             opts["model"] = model
@@ -363,10 +412,16 @@ class ProjectChatHandler:
                         )
                     else:
                         log_chat(req.user_id, msg.session_id or req.requested_session_id, "assistant", content, model=req.model)
+                        # Check if response contains numbered options (even without synthetic_response)
+                        has_options = req.synthetic_response is not None or _detect_numbered_options(content)
+                        # Message is considered streamed if drafts were created, regardless of options
+                        # Options will be sent separately by _reply_smart()/_send_smart()
+                        is_streamed = bool(req.streaming_handler and req.streaming_handler.drafts)
+                        logger.debug(f"Response ready: has_synthetic={bool(req.synthetic_response)}, has_numbered_options={_detect_numbered_options(content)}, has_options={has_options}, is_streamed={is_streamed}, content_len={len(content)}")
                         response = ChatResponse(
                             content=content, success=True, session_id=msg.session_id,
-                            has_options=req.synthetic_response is not None,
-                            streamed=bool(req.streaming_handler and req.streaming_handler.drafts),
+                            has_options=has_options,
+                            streamed=is_streamed,
                         )
 
                     if not req.future.done():

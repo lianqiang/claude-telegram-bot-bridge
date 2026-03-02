@@ -57,60 +57,26 @@ class StreamingMessageHandler:
     def _is_not_modified_error(error: Exception) -> bool:
         return "message is not modified" in str(error).lower()
 
-    async def _send_draft_compat(self, text: str) -> tuple[Optional[Any], Optional[str]]:
-        """
-        Try Telegram draft API first, then gracefully fall back.
-
-        Some runtime environments expose ExtBot.send_message_draft with a required
-        `draft_id` parameter. Older/other environments may not support it.
-        """
-        if not hasattr(self.bot, "send_message_draft"):
-            return None, None
-
-        draft_id = self._next_draft_id()
-        try:
-            message = await self.bot.send_message_draft(
-                chat_id=self.chat_id,
-                draft_id=draft_id,
-                text=text,
-            )
-            return message, draft_id
-        except TypeError as e:
-            logger.warning(f"send_message_draft signature mismatch, fallback to send_message: {e}")
-            return None, None
-        except TelegramError as e:
-            logger.warning(f"send_message_draft failed, fallback to send_message: {e}")
-            return None, None
-        except Exception as e:
-            logger.warning(f"send_message_draft unexpected error, fallback to send_message: {e}")
-            return None, None
-
     async def create_draft(self, text: str) -> Optional[DraftState]:
         """Send initial draft message"""
         content = text or "..."
         try:
-            message, draft_id = await self._send_draft_compat(content)
-            message_id = self._extract_message_id(message) if message is not None else None
+            # Use regular send_message to get message_id for subsequent edits
+            # send_message_draft returns bool and doesn't provide message_id
+            sent_message = await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=content,
+            )
+            message_id = self._extract_message_id(sent_message)
             if message_id is None:
-                if message is not None:
-                    logger.warning(
-                        f"send_message_draft returned non-message type ({type(message).__name__}), fallback to send_message"
-                    )
-                sent_message = await self.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=content,
-                )
-                message_id = self._extract_message_id(sent_message)
-                if message_id is None:
-                    raise RuntimeError("send_message did not return a message with valid message_id")
-                draft_id = None
+                raise RuntimeError("send_message did not return a message with valid message_id")
 
             draft = DraftState(
                 message_id=message_id,
                 text=text,
                 last_update_time=time.time(),
                 char_count_since_update=0,
-                draft_id=draft_id,
+                draft_id=None,
             )
             self.drafts.append(draft)
             logger.debug(f"Created draft message {draft.message_id} for user {self.user_id}")
@@ -217,8 +183,38 @@ class StreamingMessageHandler:
         if self._finalized:
             return False
 
+        chunk_size = len(new_text_chunk)
+        logger.debug(f"Received chunk: {chunk_size} chars, accumulated before: {len(self.accumulated_text)} chars")
+
+        # If chunk is large, simulate progressive updates
+        if chunk_size > self.min_chars:
+            # Split large chunk into smaller pieces for progressive updates
+            chunk_start = 0
+            while chunk_start < chunk_size:
+                chunk_end = min(chunk_start + self.min_chars, chunk_size)
+                partial_chunk = new_text_chunk[chunk_start:chunk_end]
+                self.accumulated_text += partial_chunk
+
+                # Check for overflow
+                if len(self.accumulated_text) >= 4000:
+                    await self.handle_overflow()
+                    chunk_start = chunk_end
+                    continue
+
+                # Create first draft if needed
+                if not self.drafts:
+                    await self.create_draft(self.accumulated_text)
+                else:
+                    # Update existing draft
+                    current_draft = self.drafts[-1]
+                    await self.update_draft(current_draft, self.accumulated_text)
+
+                chunk_start = chunk_end
+            return True
+
+        # Small chunk - normal accumulation
         self.accumulated_text += new_text_chunk
-        logger.debug(f"Accumulated {len(self.accumulated_text)} chars (chunk: {len(new_text_chunk)} chars)")
+        logger.debug(f"Accumulated {len(self.accumulated_text)} chars (chunk: {chunk_size} chars)")
 
         # Check for overflow
         if len(self.accumulated_text) >= 4000:
