@@ -109,6 +109,9 @@ class TelegramBot:
         self._user_queue_locks: Dict[int, asyncio.Lock] = {}
         # Track currently executing task per user for priority stop command
         self._active_tasks: Dict[int, asyncio.Task] = {}
+        # Track current message text and time being processed, for append-on-interrupt
+        self._active_texts: Dict[int, str] = {}
+        self._active_text_times: Dict[int, float] = {}
         self._audio_dir = config.bot_data_dir / "audio"
         self._audio_processor = AudioProcessor(ffmpeg_path=config.ffmpeg_path)
         self._whisper_transcriber: Optional[WhisperTranscriber] = None
@@ -124,6 +127,7 @@ class TelegramBot:
     _DENY_OUTSIDE_TOKEN = "DENY_OUTSIDE"
     _PATH_KEYWORDS = ("path", "file", "cwd", "dir", "directory", "root")
     _MAX_INFLIGHT_MESSAGES = 3
+    _APPEND_WINDOW = 10  # seconds - append new message to active task if within this window
     _STALE_AUDIO_SECONDS = 24 * 60 * 60
 
     async def _post_init(self, application: Application):
@@ -472,6 +476,11 @@ class TelegramBot:
         )
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text_message),
+            group=2,
+        )
+        # Edited message handler - cancel previous and reprocess
+        self.application.add_handler(
+            MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT & ~filters.COMMAND, self._handle_edited_message),
             group=2,
         )
 
@@ -1430,8 +1439,10 @@ class TelegramBot:
         self, update: Update, user_id: int, text: str
     ) -> None:
         current_session = await session_manager.get_session(user_id)
+        # Use effective_message to support both new and edited messages
+        message = update.effective_message
         try:
-            await update.message.chat.send_action(action="typing")
+            await message.chat.send_action(action="typing")
         except Exception:
             pass
 
@@ -1444,32 +1455,31 @@ class TelegramBot:
                 user_message=text,
                 user_id=user_id,
                 chat_id=update.effective_chat.id,
-                message_id=update.message.message_id,
+                message_id=message.message_id,
                 session_id=self._effective_session_id(user_id, current_session),
                 model=current_session.get("model"),
                 new_session=new_session,
                 permission_callback=self._permission_callback,
-                typing_callback=lambda: update.message.chat.send_action(
+                typing_callback=lambda: message.chat.send_action(
                     action="typing"
                 ),
                 bot=self.application.bot,
             )
             await self._save_session_id(user_id, response)
             await self._reply_smart(
-                update.message,
+                message,
                 response.content,
                 parse_mode="Markdown",
                 force_options=response.has_options,
                 streamed=response.streamed,
             )
         except asyncio.CancelledError:
-            # Task was cancelled by /stop command - silently exit
-            # The /stop handler will send the user response
+            # Task was cancelled by /stop or message edit - silently exit
             logger.debug(f"Message processing cancelled for user {user_id}")
             raise
         except Exception as e:
             logger.error(f"Error in project chat: {e}", exc_info=True)
-            await update.message.reply_text(
+            await message.reply_text(
                 "❌ Sorry, an error occurred while processing your message.\n"
                 f"Error: {str(e)}\n\n"
                 "Please try again later."
@@ -1666,12 +1676,66 @@ class TelegramBot:
             log_debug(user_id, "bot", reply)
             return
 
+        # If a task is actively processing within the append window, cancel and combine
+        active_task = self._active_tasks.get(user_id)
+        prev_text = self._active_texts.get(user_id)
+        prev_time = self._active_text_times.get(user_id, 0)
+        if (active_task and not active_task.done() and prev_text
+                and time.time() - prev_time < self._APPEND_WINDOW):
+            await self._cancel_user_streaming(user_id)
+            active_task.cancel()
+            await project_chat_handler.stop(user_id)
+            self._clear_user_queue(user_id)
+            # Combine previous + new message
+            text = prev_text + "\n" + text
+            logger.info(f"Appended message for user {user_id}, combined length={len(text)}")
+
+        async def run_task():
+            self._active_texts[user_id] = text
+            self._active_text_times[user_id] = time.time()
+            try:
+                await self._process_user_message_text(update, user_id, text)
+            finally:
+                self._active_texts.pop(user_id, None)
+                self._active_text_times.pop(user_id, None)
+
+        async def on_overflow():
+            reply = "⏳ Processing previous messages, please wait or send /stop to terminate."
+            await update.message.reply_text(reply)
+            log_debug(user_id, "bot", reply)
+
+        await self._enqueue_user_task(user_id, run_task, on_overflow)
+
+    async def _handle_edited_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Handle edited messages - cancel active task and reprocess with new text."""
+        if not await self._check_access(update):
+            return
+        msg = update.edited_message
+        if not msg or not msg.text:
+            return
+
+        user_id = update.effective_user.id
+        text = msg.text
+        logger.info(f"Edited message from user {user_id}: {text[:80]}...")
+
+        # Cancel active task and streaming (same as /stop)
+        await self._cancel_user_streaming(user_id)
+        active_task = self._active_tasks.get(user_id)
+        if active_task and not active_task.done():
+            active_task.cancel()
+            logger.info(f"Cancelled active task for user {user_id} due to message edit")
+        await project_chat_handler.stop(user_id)
+        self._clear_user_queue(user_id)
+
+        # Reprocess the edited text as a new message
         async def run_task():
             await self._process_user_message_text(update, user_id, text)
 
         async def on_overflow():
             reply = "⏳ Processing previous messages, please wait or send /stop to terminate."
-            await update.message.reply_text(reply)
+            await msg.reply_text(reply)
             log_debug(user_id, "bot", reply)
 
         await self._enqueue_user_task(user_id, run_task, on_overflow)
