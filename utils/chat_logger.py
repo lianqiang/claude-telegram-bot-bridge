@@ -46,7 +46,9 @@ def log_chat(
 
     # Debug mode: also print to terminal
     if os.environ.get("BOT_DEBUG"):
-        print(f"\n{'='*60}\n{entry}{'='*60}", file=sys.stderr, flush=True)
+        from telegram_bot.core.bot import _tables_to_plain
+        display = _tables_to_plain(entry)
+        print(f"\n{'='*60}\n{display}{'='*60}", file=sys.stderr, flush=True)
 
     # Session log file: debug mode only
     if os.environ.get("BOT_DEBUG"):

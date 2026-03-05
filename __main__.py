@@ -5,6 +5,9 @@ import sys
 from pathlib import Path as _Path
 
 if __name__ == "__main__":
+    # Remove CLAUDECODE env var to allow spawning Claude Code from this process
+    os.environ.pop("CLAUDECODE", None)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs="?", help="Project path")
     parser.add_argument("--path", dest="path_opt", help="Project path")

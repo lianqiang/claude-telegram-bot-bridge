@@ -117,21 +117,35 @@ class StreamingMessageHandler:
         return (new_char_count >= self.min_chars or time_elapsed >= self.min_interval)
 
     async def finalize_draft(self, draft: DraftState) -> bool:
-        """Convert draft to regular message"""
+        """Convert draft to regular message, trying Markdown parse mode first."""
         try:
             await self.bot.edit_message_text(
                 chat_id=self.chat_id,
                 message_id=draft.message_id,
-                text=draft.text
+                text=draft.text,
+                parse_mode="Markdown",
             )
-            logger.debug(f"Finalized draft {draft.message_id}")
+            logger.debug(f"Finalized draft {draft.message_id} (Markdown)")
             return True
         except TelegramError as e:
             if self._is_not_modified_error(e):
                 logger.debug(f"Draft {draft.message_id} already up-to-date on finalize")
                 return True
-            logger.error(f"Failed to finalize draft {draft.message_id}: {e}")
-            return False
+            # Markdown parse failed, fall back to plain text
+            logger.debug(f"Markdown finalize failed for draft {draft.message_id}, falling back to plain text: {e}")
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=draft.message_id,
+                    text=draft.text,
+                )
+                logger.debug(f"Finalized draft {draft.message_id} (plain)")
+                return True
+            except TelegramError as e2:
+                if self._is_not_modified_error(e2):
+                    return True
+                logger.error(f"Failed to finalize draft {draft.message_id}: {e2}")
+                return False
 
     def _find_split_boundary(self, text: str, max_length: int = 4000) -> int:
         """Find smart boundary for text splitting (paragraph > line > hard cut)"""
@@ -245,6 +259,10 @@ class StreamingMessageHandler:
             return False
 
         self._finalized = True
+
+        # Convert tables to code blocks for better Telegram display
+        from telegram_bot.core.bot import _tables_to_codeblocks
+        self.accumulated_text = _tables_to_codeblocks(self.accumulated_text)
 
         # Update last draft with final accumulated text
         if self.drafts and self.accumulated_text:

@@ -24,6 +24,21 @@ from claude_code_sdk import (
 )
 
 from claude_code_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+import claude_code_sdk._internal.message_parser as _sdk_parser
+
+# Monkey-patch parse_message to handle unknown message types gracefully.
+# The SDK raises MessageParseError on unknown types (e.g. rate_limit_event),
+# which kills the async generator and terminates the entire message stream.
+_original_parse_message = _sdk_parser.parse_message
+
+def _patched_parse_message(data):
+    try:
+        return _original_parse_message(data)
+    except Exception as e:
+        logger.warning(f"Skipping unparseable SDK message: {e}")
+        return None
+
+_sdk_parser.parse_message = _patched_parse_message
 
 from telegram_bot.utils.chat_logger import log_chat
 from telegram_bot.utils.config import config
@@ -235,6 +250,7 @@ class ProjectChatHandler:
             ),
             "can_use_tool": can_use_tool,
             "permission_mode": "default",
+            "extra_args": {"chrome": None},
         }
         if model:
             opts["model"] = model
@@ -348,6 +364,9 @@ class ProjectChatHandler:
     async def _reader_loop(self, user_id: int, state: _UserStreamState) -> None:
         try:
             async for msg in state.client.receive_messages():
+                if msg is None:
+                    continue
+
                 if not state.pending:
                     continue
 
@@ -374,7 +393,8 @@ class ProjectChatHandler:
                                 except Exception as e:
                                     logger.error(f"Streaming update failed: {e}")
                             if os.environ.get("BOT_DEBUG"):
-                                print(f"\033[36m[Claude]\033[0m {block.text[:200]}")
+                                preview = block.text if "|" in block.text else block.text[:200]
+                                print(f"\033[36m[Claude]\033[0m {preview}")
                         elif isinstance(block, ToolUseBlock):
                             if os.environ.get("BOT_DEBUG"):
                                 print(f"\033[33m[Tool: {block.name}]\033[0m {str(block.input)[:150]}")

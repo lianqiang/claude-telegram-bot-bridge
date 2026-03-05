@@ -47,6 +47,56 @@ def _esc_md2(text: str) -> str:
     return re.sub(r"([_*\[\]()~`>#+=|{}.!\\-])", r"\\\1", text)
 
 
+def _align_table(text: str) -> str:
+    """Parse a pipe table block into aligned rows (no wrapping)."""
+    lines = [l.strip() for l in text.strip().splitlines()]
+    rows: list[list[str]] = []
+    for line in lines:
+        stripped = line.strip("|").strip()
+        if re.match(r"^[\s\-:|]+$", stripped):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        cells = [re.sub(r"\*\*(.+?)\*\*", r"\1", c) for c in cells]
+        cells = [re.sub(r"`([^`]+)`", r"\1", c) for c in cells]
+        rows.append(cells)
+    if not rows:
+        return text
+
+    n_cols = max(len(r) for r in rows)
+    widths = [0] * n_cols
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    formatted = []
+    for row in rows:
+        parts = []
+        for i in range(n_cols):
+            cell = row[i] if i < len(row) else ""
+            parts.append(cell.ljust(widths[i]))
+        formatted.append("  ".join(parts))
+    return "\n".join(formatted)
+
+
+# Regex for consecutive pipe-delimited table lines
+_TABLE_RE = re.compile(r"((?:^[ \t]*\|.+\|[ \t]*$\n?){2,})", re.MULTILINE)
+
+
+def _tables_to_codeblocks(text: str) -> str:
+    """Convert markdown pipe tables to code blocks for Telegram display."""
+    def _convert(m: re.Match) -> str:
+        aligned = _align_table(m.group(0))
+        return "\n```\n" + aligned + "\n```\n"
+    return _TABLE_RE.sub(_convert, text)
+
+
+def _tables_to_plain(text: str) -> str:
+    """Convert markdown pipe tables to aligned plain text for terminal display."""
+    def _convert(m: re.Match) -> str:
+        return "\n" + _align_table(m.group(0)) + "\n"
+    return _TABLE_RE.sub(_convert, text)
+
+
 class TelegramBot:
     def __init__(self):
         self.application: Optional[Application] = None
@@ -1846,7 +1896,8 @@ class TelegramBot:
         """Reply with text (splitting if needed), send referenced files, and add option buttons."""
         # Skip text sending if already streamed
         if not streamed:
-            for part in self._split_text(content):
+            formatted = _tables_to_codeblocks(content)
+            for part in self._split_text(formatted):
                 try:
                     await message.reply_text(part, parse_mode=parse_mode)
                 except Exception:
@@ -1877,7 +1928,8 @@ class TelegramBot:
 
         # Skip text sending if already streamed
         if not streamed:
-            for part in self._split_text(content):
+            formatted = _tables_to_codeblocks(content)
+            for part in self._split_text(formatted):
                 try:
                     await bot.send_message(chat_id, part, parse_mode="Markdown")
                 except Exception:
