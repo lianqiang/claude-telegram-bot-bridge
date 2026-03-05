@@ -2014,15 +2014,15 @@ class TelegramBot:
     async def _set_bot_commands(self):
         """Set bot commands menu"""
         commands = [
-            BotCommand("new", "Start a new Claude Code session"),
-            BotCommand("stop", "Interrupt execution immediately"),
-            BotCommand("model", "Switch Claude Code model"),
-            BotCommand("resume", "Resume a previous session"),
-            BotCommand("history", "View recent conversation history"),
-            BotCommand("revert", "Revert to a previous conversation state"),
-            BotCommand("skills", "View available skills"),
-            BotCommand("skill", "Execute a Claude Code skill"),
-            BotCommand("command", "Execute a Claude Code command"),
+            BotCommand("new", "New session"),
+            BotCommand("stop", "Stop execution"),
+            BotCommand("model", "Switch model"),
+            BotCommand("resume", "Resume session"),
+            BotCommand("history", "View message history"),
+            BotCommand("revert", "Revert conversation"),
+            BotCommand("skills", "List skills"),
+            BotCommand("skill", "Run skill"),
+            BotCommand("command", "Run command"),
         ]
         for scope in (
             BotCommandScopeAllPrivateChats(),
