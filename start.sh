@@ -3,7 +3,7 @@
 # Telegram Skill Bot startup script
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
 VENV_DIR="$SCRIPT_DIR/venv"
 REQ_FILE="$SCRIPT_DIR/requirements.txt"
 ENV_FILE="$SCRIPT_DIR/.env"
@@ -451,6 +451,7 @@ on_exit() {
     [ -n "$BOT_PID" ] && kill "$BOT_PID" 2>/dev/null && wait "$BOT_PID" 2>/dev/null
     cleanup_pid
     cleanup_token_lock
+    [ -n "$SYMLINK_PATH" ] && [ -L "$SYMLINK_PATH" ] && rm "$SYMLINK_PATH"
 }
 trap on_exit EXIT
 trap 'exit 143' TERM INT
@@ -492,13 +493,29 @@ rapid_crash_count=0
 
 cd "$REPO_ROOT"
 
+# Resolve Python package name from directory basename.
+# If the directory name contains hyphens (e.g. claude-telegram-bot-bridge),
+# create a temporary symlink with underscores so Python can import it.
+PACKAGE_NAME="telegram_bot"
+DIR_BASENAME="$(basename "$REPO_ROOT")"
+PARENT_DIR="$(dirname "$REPO_ROOT")"
+SYMLINK_PATH=""
+
+if [ "$DIR_BASENAME" != "$PACKAGE_NAME" ]; then
+    SYMLINK_PATH="$PARENT_DIR/$PACKAGE_NAME"
+    if [ -L "$SYMLINK_PATH" ]; then
+        rm "$SYMLINK_PATH"
+    fi
+    ln -s "$DIR_BASENAME" "$SYMLINK_PATH"
+fi
+
 while true; do
     echo ""
     echo "🚀 Starting Telegram Bot..."
     echo "================================"
 
     start_time=$(date +%s)
-    "$VENV_DIR/bin/python" -m telegram_bot --path "$PROJECT_ROOT" &
+    PYTHONPATH="$PARENT_DIR:${PYTHONPATH:-}" "$VENV_DIR/bin/python" -m "$PACKAGE_NAME" --path "$PROJECT_ROOT" &
     BOT_PID=$!
     wait $BOT_PID
     exit_code=$?
@@ -509,6 +526,12 @@ while true; do
     if [ $exit_code -eq 0 ]; then
         echo "✅ Bot exited normally"
         break
+    fi
+
+    # Restart requested (e.g. /upgrade command)
+    if [ $exit_code -eq 42 ]; then
+        echo "🔄 Restart requested, restarting immediately..."
+        continue
     fi
 
     # Log crash details

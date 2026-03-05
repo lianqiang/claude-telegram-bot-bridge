@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import shlex
 import time
@@ -135,6 +136,9 @@ class TelegramBot:
             logger.info("Startup audio cleanup removed %s stale file(s)", removed)
         await self._set_bot_commands()
         logger.info("✅ Bot initialization complete")
+
+        # Send session picker to all allowed users on startup
+        await self._send_startup_session_picker()
 
     def build(self):
         """Build the application"""
@@ -454,6 +458,8 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("revert", self._cmd_revert))
         self.application.add_handler(CommandHandler("command", self._cmd_command))
         self.application.add_handler(CommandHandler("skill", self._cmd_skill))
+        self.application.add_handler(CommandHandler("upgrade", self._cmd_upgrade))
+        self.application.add_handler(CommandHandler("restart", self._cmd_restart))
 
         # Skill command handler - catches all /commands
         self.application.add_handler(
@@ -695,6 +701,53 @@ class TelegramBot:
             reply = "ℹ️ Nothing running"
         await update.message.reply_text(reply)
         log_debug(user_id, "bot", reply)
+
+    async def _cmd_upgrade(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /upgrade - upgrade Claude CLI and restart the bot."""
+        if not await self._check_access(update):
+            return
+        user_id = update.effective_user.id
+        log_debug(user_id, "command", "/upgrade")
+
+        await update.message.reply_text("⬆️ Upgrading Claude CLI...")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "npm", "update", "-g", "@anthropic-ai/claude-code",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+            output = stdout.decode().strip() if stdout else ""
+
+            if proc.returncode == 0:
+                # Get new version
+                ver_proc = await asyncio.create_subprocess_exec(
+                    "claude", "--version",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                ver_out, _ = await ver_proc.communicate()
+                version = ver_out.decode().strip() if ver_out else "unknown"
+
+                await update.message.reply_text(f"✅ Upgraded to {version}\n🔄 Restarting...")
+                logger.info(f"Claude CLI upgraded to {version}, restarting bot")
+                # Exit with code 42 — signals start.sh to restart
+                os._exit(42)
+            else:
+                await update.message.reply_text(f"❌ Upgrade failed:\n```\n{output[:1000]}\n```", parse_mode="Markdown")
+        except asyncio.TimeoutError:
+            await update.message.reply_text("❌ Upgrade timed out after 120s")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Upgrade error: {e}")
+
+    async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /restart - restart the bot process."""
+        if not await self._check_access(update):
+            return
+        log_debug(update.effective_user.id, "command", "/restart")
+        await update.message.reply_text("🔄 Restarting...")
+        os._exit(42)
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /history - display recent messages from current session."""
@@ -1945,6 +1998,87 @@ class TelegramBot:
             if kb:
                 await bot.send_message(chat_id, "Please select:", reply_markup=kb)
 
+    async def _send_startup_session_picker(self):
+        """Send session picker to allowed users on bot startup."""
+        sessions = project_chat_handler.list_sessions(limit=8)
+        bot = self.application.bot
+
+        for uid in config.allowed_user_ids:
+            try:
+                if not sessions:
+                    await bot.send_message(uid, "🆕 Bot started. New session ready.")
+                    continue
+
+                lines = ["🤖 *Bot restarted*\n"]
+                buttons = [[InlineKeyboardButton("🆕 New session", callback_data="startup:new")]]
+
+                for i, (sid, first_msg, mtime) in enumerate(sessions):
+                    stats = project_chat_handler.get_session_stats(sid)
+                    delta = int(time.time() - mtime)
+                    if delta < 60:
+                        ts = f"{delta}s ago"
+                    elif delta < 3600:
+                        ts = f"{delta // 60}m ago"
+                    elif delta < 86400:
+                        ts = f"{delta // 3600}h ago"
+                    else:
+                        ts = datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
+
+                    msg_count = stats["user_msgs"] + stats["assistant_msgs"]
+                    esc_msg = _esc_md2(first_msg.replace("\n", " "))
+                    esc_ts = _esc_md2(ts)
+                    lines.append(f"*{i + 1}\\.* {esc_msg}")
+
+                    # Line 2: time, msg count, model
+                    detail = f"   ⏱ {esc_ts} \\| 💬 {_esc_md2(str(msg_count))} msgs"
+                    if stats.get("model"):
+                        # Shorten model name: claude-opus-4-6 -> opus 4.6
+                        model_short = stats["model"].replace("claude-", "").replace("-", " ", 1).replace("-", ".")
+                        detail += f" \\| 🧠 {_esc_md2(model_short)}"
+                    lines.append(detail)
+
+                    # Line 3: cwd (only if meaningful, skip ~ alone), git branch (skip HEAD)
+                    meta_parts = []
+                    if stats.get("cwd"):
+                        cwd = stats["cwd"].rstrip("/")
+                        home = str(FilePath.home())
+                        if cwd != home:  # Skip showing just "~"
+                            if cwd.startswith(home + "/"):
+                                cwd_short = "~/" + cwd[len(home) + 1:]
+                            else:
+                                cwd_short = cwd
+                            meta_parts.append(f"📁 {_esc_md2(cwd_short)}")
+                    if stats.get("git_branch") and stats["git_branch"] != "HEAD":
+                        meta_parts.append(f"🌿 {_esc_md2(stats['git_branch'])}")
+                    if meta_parts:
+                        lines.append(f"   {' \\| '.join(meta_parts)}")
+
+                    # Lines 4+: recent chat history
+                    recent = stats.get("recent_user_msgs", [])
+                    if recent:
+                        for rmsg in recent:
+                            lines.append(f"   💬 {_esc_md2(rmsg[:50])}")
+                    if stats.get("last_assistant"):
+                        lines.append(f"   🤖 {_esc_md2(stats['last_assistant'][:60])}")
+                    lines.append("")
+
+                    btn_label = f"{i + 1}) {first_msg[:30]}"
+                    buttons.append([InlineKeyboardButton(btn_label, callback_data=f"startup:{sid}")])
+
+                # Store session list for this user
+                session = await session_manager.get_session(uid)
+                session["startup_sessions"] = [(sid, first_msg) for sid, first_msg, _ in sessions]
+                await session_manager.update_session(uid, session)
+
+                await bot.send_message(
+                    uid,
+                    "\n".join(lines),
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send startup picker to user {uid}: {e}")
+
     async def _handle_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
@@ -1957,6 +2091,33 @@ class TelegramBot:
 
         user_id = update.effective_user.id
         data = query.data
+
+        # Handle startup session picker
+        if data.startswith("startup:"):
+            session = await session_manager.get_session(user_id)
+            session.pop("startup_sessions", None)
+
+            if data == "startup:new":
+                session["session_id"] = None
+                session["new_session"] = True
+                await session_manager.update_session(user_id, session)
+                await query.delete_message()
+                await context.bot.send_message(query.message.chat_id, "🆕 New session started.")
+                return
+
+            sid = data.split(":", 1)[1]
+            session["session_id"] = sid
+            session["new_session"] = False
+            await session_manager.update_session(user_id, session)
+            self._runtime_active_sessions.add(user_id)
+
+            await query.delete_message()
+            last_msg = project_chat_handler.get_session_last_assistant_message(sid, max_chars=200)
+            reply = "✅ Resumed session"
+            if last_msg:
+                reply += f"\n\n📋 {last_msg}"
+            await context.bot.send_message(query.message.chat_id, reply)
+            return
 
         if data.startswith("extsend:"):
             session = await session_manager.get_session(user_id)
@@ -2075,6 +2236,8 @@ class TelegramBot:
             BotCommand("skills", "List skills"),
             BotCommand("skill", "Run skill"),
             BotCommand("command", "Run command"),
+            BotCommand("upgrade", "Upgrade Claude CLI & restart"),
+            BotCommand("restart", "Restart bot"),
         ]
         for scope in (
             BotCommandScopeAllPrivateChats(),

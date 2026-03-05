@@ -179,6 +179,7 @@ class ProjectChatHandler:
         self._active_tasks: Dict[int, asyncio.Task] = {}
         self._streams: Dict[int, _UserStreamState] = {}
         self._stream_init_locks: Dict[int, asyncio.Lock] = {}
+        self._last_session_ids: Dict[int, str] = {}
         logger.info(f"ProjectChatHandler initialized for {self.project_root}")
 
     def _get_stream_init_lock(self, user_id: int) -> asyncio.Lock:
@@ -258,6 +259,11 @@ class ProjectChatHandler:
         client = ClaudeSDKClient(options=ClaudeCodeOptions(**opts))
         await client.connect()
         state = _UserStreamState(client=client, model=model)
+        # Restore last session ID so the conversation can be resumed after timeout/disconnect
+        preserved_sid = self._last_session_ids.pop(user_id, None)
+        if preserved_sid:
+            state.last_session_id = preserved_sid
+            logger.info(f"Restored session ID {preserved_sid} for user {user_id}")
         state_holder["state"] = state
         state.reader_task = asyncio.create_task(self._reader_loop(user_id, state))
         state.typing_task = asyncio.create_task(self._typing_keepalive_loop(user_id, state))
@@ -267,6 +273,10 @@ class ProjectChatHandler:
         state = self._streams.pop(user_id, None)
         if not state:
             return False
+
+        # Preserve last session ID so next stream can resume the conversation
+        if state.last_session_id:
+            self._last_session_ids[user_id] = state.last_session_id
 
         # Cancel typing keepalive task
         if state.typing_task and not state.typing_task.done():
@@ -327,6 +337,8 @@ class ProjectChatHandler:
 
             if state and (new_session or state.model != model):
                 await self._disconnect_user_stream(user_id)
+                if new_session:
+                    self._last_session_ids.pop(user_id, None)
                 state = None
 
             if not state:
@@ -641,6 +653,65 @@ class ProjectChatHandler:
             if len(results) >= limit:
                 break
         return results
+
+    def get_session_stats(self, session_id: str) -> dict:
+        """Get stats for a session: message count, last messages, cwd, git branch, model."""
+        filepath = CONVERSATIONS_DIR / f"{session_id}.jsonl"
+        stats = {
+            "user_msgs": 0, "assistant_msgs": 0,
+            "last_user": None, "last_assistant": None,
+            "recent_user_msgs": [],  # last N user messages for context
+            "cwd": None, "git_branch": None, "model": None,
+        }
+        if not filepath.exists():
+            return stats
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Extract metadata from record top-level and message
+                    if d.get("cwd") and not stats["cwd"]:
+                        stats["cwd"] = d["cwd"]
+                    if d.get("gitBranch"):
+                        stats["git_branch"] = d["gitBranch"]
+                    # model lives inside message for assistant records
+                    msg_model = d.get("model") or d.get("message", {}).get("model")
+                    if msg_model:
+                        stats["model"] = msg_model
+
+                    msg = d.get("message", {})
+                    role = msg.get("role")
+                    if d.get("type") == "user" and role == "user":
+                        stats["user_msgs"] += 1
+                        content = msg.get("content", "")
+                        text = ""
+                        if isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict) and c.get("type") == "text":
+                                    text = c["text"]
+                                    break
+                        elif isinstance(content, str):
+                            text = content
+                        text = text.strip()
+                        if text and not text.startswith("<"):
+                            stats["last_user"] = text[:80]
+                            stats["recent_user_msgs"].append(text[:60])
+                    elif d.get("type") == "assistant" and role == "assistant":
+                        stats["assistant_msgs"] += 1
+                        for block in msg.get("content", []):
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "").strip()
+                                if text:
+                                    stats["last_assistant"] = text[:100]
+        except Exception:
+            pass
+        # Keep only last 3 user messages for context
+        stats["recent_user_msgs"] = stats["recent_user_msgs"][-3:]
+        return stats
 
     def get_session_last_assistant_message(self, session_id: str, max_chars: int = 300) -> Optional[str]:
         """Extract the last assistant text message from a session JSONL file."""
