@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-03-06
+
+### Changed
+- Renamed project from "Telegram Skill Bot" to "Claude Telegram Bot Bridge"
+- Updated project name in README.md, README-zh.md, and start.sh
+- Changed version display from "Bot version" to "Bridge version"
+- Simplified update notification to non-interactive text prompt
+
 ## [0.6.2] - 2026-03-06
 
 ### Added
