@@ -35,12 +35,16 @@ compare_versions() {
 }
 
 check_update() {
+    local current
+    current="$(get_current_version)"
+
     mkdir -p "$CACHE_DIR"
     if [ -f "$CACHE_FILE" ] && [ -n "$(find "$CACHE_FILE" -mmin -60 2>/dev/null)" ]; then
+        echo -e "\033[90m✓ Bridge version: v${current} (up to date)\033[0m"
         return
     fi
-    local current latest
-    current="$(get_current_version)"
+
+    local latest
     latest="$(curl -sL --max-time 3 "https://api.github.com/repos/terranc/claude-telegram-bot-bridge/releases/latest" 2>/dev/null | grep -o '"tag_name": *"v[^"]*"' | sed 's/.*"v\([^"]*\)".*/\1/')"
     [ -z "$latest" ] && return
     touch "$CACHE_FILE"
