@@ -128,6 +128,7 @@ class TelegramBot:
     _PATH_KEYWORDS = ("path", "file", "cwd", "dir", "directory", "root")
     _MAX_INFLIGHT_MESSAGES = 3
     _APPEND_WINDOW = 10  # seconds - append new message to active task if within this window
+    _AUTO_NEW_SESSION_IDLE = 6 * 3600  # seconds - auto new session after idle
     _STALE_AUDIO_SECONDS = 24 * 60 * 60
 
     async def _post_init(self, application: Application):
@@ -1448,6 +1449,19 @@ class TelegramBot:
 
         try:
             new_session = current_session.pop("new_session", False)
+
+            # Auto new session if idle too long
+            if not new_session and current_session.get("session_id"):
+                sid = current_session["session_id"]
+                jsonl = CONVERSATIONS_DIR / f"{sid}.jsonl"
+                if jsonl.exists():
+                    idle = time.time() - jsonl.stat().st_mtime
+                    if idle > self._AUTO_NEW_SESSION_IDLE:
+                        new_session = True
+                        current_session["session_id"] = None
+                        logger.info(f"Auto new session for user {user_id} after {idle/3600:.1f}h idle")
+                        await message.reply_text(f"🆕 Auto new session (idle {idle/3600:.0f}h)")
+
             if new_session:
                 await session_manager.update_session(user_id, current_session)
 
@@ -1687,7 +1701,7 @@ class TelegramBot:
             await project_chat_handler.stop(user_id)
             self._clear_user_queue(user_id)
             # Combine previous + new message
-            text = prev_text + "\n" + text
+            text = prev_text + "\n\n" + text
             logger.info(f"Appended message for user {user_id}, combined length={len(text)}")
 
         async def run_task():
