@@ -43,3 +43,4 @@ logs/
 openspec
 .ace-tool/
 /.codex
+/.commitlintrc.js

@@ -1,4 +1,4 @@
-# Telegram Skill Bot
+# Claude Telegram Bot Bridge
 
 [中文文档](README-zh.md)
 
@@ -40,6 +40,8 @@ This bot takes a different approach — **lightweight, zero-infrastructure, secu
 **Operations**
 - Daemon mode with auto-restart on crash (stops after 5 rapid crashes in 60s)
 - One-command macOS launchd auto-start on boot (`--install`)
+- Auto-update check on startup — notifies when new version available
+- One-command upgrade (`--upgrade`) — pulls latest code and reinstalls dependencies
 - MD5-based dependency caching — skips reinstall when `requirements.txt` is unchanged
 - Auto venv creation, 14-day log rotation, crash logging with exit codes
 
@@ -96,6 +98,7 @@ Then start the bot:
 ./start.sh --path /path/to/project --debug      # Debug mode
 ./start.sh --path /path/to/project --status     # Check status
 ./start.sh --path /path/to/project --stop       # Stop
+./start.sh --path /path/to/project --upgrade    # Update to latest version
 ./start.sh --path /path/to/project --install    # Install as macOS startup service
 ./start.sh --path /path/to/project --uninstall  # Remove startup service
 ```
@@ -293,3 +296,7 @@ Enables full console logging, per-session chat logs, and SDK tool call tracing.
 ## License
 
 MIT
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=terranc/claude-telegram-bot-bridge&type=Date)](https://star-history.com/#terranc/claude-telegram-bot-bridge&Date)

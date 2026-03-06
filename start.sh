@@ -15,6 +15,47 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Version check cache
+CACHE_DIR="$HOME/.telegram-bot-cache"
+CACHE_FILE="$CACHE_DIR/update_check"
+
+get_current_version() {
+    grep -E "^## \[[0-9]" "$SCRIPT_DIR/CHANGELOG.md" | head -1 | sed -E 's/^## \[([0-9.]+)\].*/\1/'
+}
+
+compare_versions() {
+    [ "$1" = "$2" ] && return 1
+    local IFS=.
+    local i ver1=($1) ver2=($2)
+    for ((i=0; i<${#ver1[@]} || i<${#ver2[@]}; i++)); do
+        [ "${ver1[i]:-0}" -gt "${ver2[i]:-0}" ] && return 2
+        [ "${ver1[i]:-0}" -lt "${ver2[i]:-0}" ] && return 0
+    done
+    return 1
+}
+
+check_update() {
+    local current
+    current="$(get_current_version)"
+
+    mkdir -p "$CACHE_DIR"
+    if [ -f "$CACHE_FILE" ] && [ -n "$(find "$CACHE_FILE" -mmin -60 2>/dev/null)" ]; then
+        echo -e "\033[90m✓ Bridge version: v${current} (up to date)\033[0m"
+        return
+    fi
+
+    local latest
+    latest="$(curl -sL --max-time 3 "https://api.github.com/repos/terranc/claude-telegram-bot-bridge/releases/latest" 2>/dev/null | grep -o '"tag_name": *"v[^"]*"' | sed 's/.*"v\([^"]*\)".*/\1/')"
+    [ -z "$latest" ] && return
+    touch "$CACHE_FILE"
+    if compare_versions "$current" "$latest"; then
+        echo -e "${BLUE}📦 Update available: v${current} → v${latest}${NC}"
+        echo -e "${BLUE}   Run: ./start.sh --upgrade${NC}"
+    else
+        echo -e "\033[90m✓ Bridge version: v${current} (up to date)\033[0m"
+    fi
+}
+
 # Check if installation is complete
 if [ ! -d "$VENV_DIR" ] || [ ! -f "$ENV_FILE" ]; then
     echo ""
@@ -71,6 +112,10 @@ while [ $# -gt 0 ]; do
             ACTION="stop"
             shift
             ;;
+        --upgrade)
+            ACTION="upgrade"
+            shift
+            ;;
         --_daemon_child)
             # Internal flag: marks current process as daemon child, run in foreground
             DAEMON_MODE=0
@@ -88,6 +133,7 @@ Options:
   --debug             Enable debug/verbose logging
   --status            Show whether the bot is running
   --stop              Stop the running bot
+  --upgrade           Update bot to latest version
   --install           Install as macOS launchd startup service
   --uninstall         Remove macOS launchd startup service
 EOF
@@ -103,7 +149,7 @@ EOF
     esac
 done
 
-echo "🤖 Telegram Skill Bot Startup Script"
+echo "🤖 Claude Telegram Bot Bridge"
 echo "================================"
 
 if [ -n "$BOT_DEBUG" ]; then
@@ -354,6 +400,46 @@ do_uninstall() {
     exit 0
 }
 
+do_upgrade() {
+    echo "🔄 Checking for updates..."
+    local current latest
+    current="$(get_current_version)"
+    latest="$(curl -sL --max-time 3 "https://api.github.com/repos/terranc/claude-telegram-bot-bridge/releases/latest" 2>/dev/null | grep -o '"tag_name": *"v[^"]*"' | sed 's/.*"v\([^"]*\)".*/\1/')"
+
+    if [ -z "$latest" ]; then
+        echo "❌ Failed to fetch latest version from GitHub"
+        exit 1
+    fi
+
+    if ! compare_versions "$current" "$latest"; then
+        echo "✅ Already up to date (v${current})"
+        exit 0
+    fi
+
+    echo "📦 Update available: v${current} → v${latest}"
+
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        echo "⚠️  Uncommitted changes detected. Commit or stash them first."
+        exit 1
+    fi
+
+    echo "⬇️  Pulling latest code..."
+    if ! git pull; then
+        echo "❌ git pull failed"
+        exit 1
+    fi
+
+    echo "📦 Reinstalling dependencies..."
+    if ! "$VENV_DIR/bin/pip" install -q -r "$REQ_FILE"; then
+        echo "❌ Dependency installation failed"
+        exit 1
+    fi
+
+    current="$(get_current_version)"
+    echo "✅ Upgrade complete! Now running v${current}"
+    exit 0
+}
+
 # ── Dispatch action ──
 
 case "$ACTION" in
@@ -361,8 +447,12 @@ case "$ACTION" in
     stop)      do_stop ;;
     install)   do_install ;;
     uninstall) do_uninstall ;;
+    upgrade)   do_upgrade ;;
     run)       ;; # Continue to startup flow below
 esac
+
+# Check for updates (skip if running upgrade action)
+[ "$ACTION" = "run" ] && check_update
 
 load_optional_env() {
     local env_cli

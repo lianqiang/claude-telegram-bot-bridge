@@ -1,4 +1,4 @@
-# Telegram Skill Bot
+# Claude Telegram Bot Bridge
 
 [English](README.md)
 
@@ -40,6 +40,8 @@ Claude Code 很强大，但它绑定在你的终端里。当你离开电脑 — 
 **运维**
 - 守护进程模式，崩溃自动重启（60 秒内连续崩溃 5 次则停止）
 - 一条命令安装 macOS launchd 开机自启（`--install`）
+- 启动时自动检测更新 — 有新版本时提示
+- 一条命令升级（`--upgrade`）— 拉取最新代码并重装依赖
 - 基于 MD5 的依赖缓存 — `requirements.txt` 未变则跳过安装
 - 自动创建 venv、14 天日志自动清理、崩溃日志含退出码
 
@@ -96,6 +98,7 @@ cd claude-telegram-bot-bridge
 ./start.sh --path /path/to/project --debug      # 调试模式
 ./start.sh --path /path/to/project --status     # 查看状态
 ./start.sh --path /path/to/project --stop       # 停止
+./start.sh --path /path/to/project --upgrade    # 更新到最新版本
 ./start.sh --path /path/to/project --install    # 安装为 macOS 开机自启服务
 ./start.sh --path /path/to/project --uninstall  # 移除开机自启服务
 ```
@@ -290,3 +293,7 @@ ffmpeg -version
 ## 许可证
 
 MIT
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=terranc/claude-telegram-bot-bridge&type=Date)](https://star-history.com/#terranc/claude-telegram-bot-bridge&Date)
